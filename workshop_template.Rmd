@@ -1,0 +1,245 @@
+---
+title: 'vegan workshop - Eco-Data-Science'
+author: "Caroline Owens"
+date: "3 December 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+More details regarding ordination and visualization can be found [here](http://rpubs.com/an-bui/553683).
+
+What is community data?
+Rows are sites, columns are species, cell values are # occurences
+Goals: 
+1) describe characteristics - how speciose, how diverse
+2) determine effects of environmental factors/groupings on community patterns
+
+What is vegan?/the tidyverse?
+
+Standard tools to import, clean, analyse, and visualize data
+
+Today's data: birds at 210 sites with 3 landtypes (dry, riparian, mixed)
+Info for each site on tree canopy structure (stems per hectare, basal area, % canopy cover, canopy height) = the environmental variables that may affect bird community structure
+
+
+```{r libraries-data, message = FALSE}
+# libraries
+library(tidyverse)
+library(vegan)
+
+# data
+# bird communities
+birds <- read_csv("bird-comm.csv") %>% 
+  column_to_rownames("site") #this is important for separating site names from count data
+
+# environmental variables
+env <- read_csv("env-var.csv")
+
+# set up a "metadata" frame - will be useful for plotting later!
+site_type <- env %>% 
+  # selects the named columns
+  select(site, landtype)
+```
+
+### How speciose are my communities?
+
+```{r species-richness}
+#vegan::specnumber counts the number of species in each site
+#output is a named vector (rows in your dataframe should be named by site)
+sppr <- specnumber(birds)
+
+#simple analysis of variance to see if mean # spp is different by habitat
+#stats::aov(response ~ independent variable, data = group_df)
+# here, how is species richness a function of landtype 
+sppr_aov <- aov(sppr ~ landtype, data = site_type)
+summary(sppr_aov) #no sig diff among landtypes
+```
+
+```{r species-richness-plot}
+# create dataframe for plotting
+sppr_df <- sppr %>% 
+  # take spp richness and convert the named vector into a dataframe
+  enframe() %>% 
+  # and link it with the metadata frame site_type
+  full_join(site_type, by = c("name" = "site"))
+#your output is a df of sites, spp numbers, and land types 
+sppr_plot <- ggplot(sppr_df, aes(x = landtype, y = value, color = landtype)) +
+  geom_boxplot()
+sppr_plot
+```
+
+### How diverse are my communities?
+
+Pick the function that is most relevant to your data...
+
+```{r shannon-diversity}
+# vegan::diversity() will calculate shannon (default), simpson, and fisher indices
+shannondiv <- diversity(birds)
+# again creates named vector 
+# try simpson's diversity
+simpsondiv <- diversity(birds, index = "simpson")
+```
+
+
+
+```{r shannon-diversity-plot}
+shandiv_df <- shannondiv %>% 
+  # convert named vector to dataframe
+  enframe() %>% 
+  # join with metadata: this joins shandiv_df to site_type matching shandiv_df$name to site_type$site
+  full_join(., site_type, by = c("name" = "site")) %>% 
+  # then calculate mean diversity for each landtype
+  group_by(landtype) %>% 
+  summarize(mean = mean(value))
+
+shandiv_plot <- ggplot(shandiv_df, aes(x = landtype, y = mean, fill = landtype)) +
+  geom_col()
+shandiv_plot
+```
+
+### How different are my communities in species composition?
+
+Ordination: each species is an axis along which your sites fall. Ordination compresses all these axes into 2
+There are many different ways to do this math - here are three of the most basic ones.
+
+#### perMANOVA
+Permutational analysis of variance: are the centroids of my communities different?
+```{r bird-permanova}
+# vegan::adonis() takes the same input format as stats::aov() = response ~ IV, data = group_df
+bird_perm <- adonis(birds ~ landtype, data = env)
+bird_perm
+```
+
+#### PCA
+
+There are as many PCs as there are columns in your matrix, but you can plot as many as you want... best to see what you can do with 2 or maybe 3 for best visualization
+
+```{r bird-PCA}
+# Principal components analysis = a rotation of axes
+# redundancy analysis (rda) is an unconstrained ordination - the variation based ONLY on species data
+# a constrained ordination would ask how env variables shape community composition
+birdPCA <- rda(birds) #no env variables in here
+birdPCA
+# pay attention to the inertia term in output - inertia is all the variation in community composition that
+# exists in your dataset
+
+summary(birdPCA)
+# this gives a big output of where species fall in the ordination (species scores and site scores) as well as
+# importance of components - again components are made up just of spp abundances
+
+pcabiplot <- biplot(birdPCA)
+# this plot is not necessarily that informative
+# str(pcabiplot) : you have coordinates for points and for ends of arrows
+
+# can extract informative info from the biplot
+PCAscores <- as.data.frame(pcabiplot$sites) %>% 
+  bind_cols(site_type, .)
+
+PCAvect <- as.data.frame(pcabiplot$species)
+
+
+PCA_plot <- ggplot(PCAscores) +
+  geom_point(aes(x = PC1, y = PC2, color = landtype)) +
+  geom_segment(data = PCAvect, aes(x = 0, y = 0, xend = PC1, yend = PC2), #make segements coming out from origin
+               arrow = arrow(length = unit(0.2, "cm"))) + #arrow length indicates contribution to component
+              # sharp angle between arrows indicates correlation between species; 90 deg -> independence
+  geom_text(data = PCAvect, aes(x = PC1, y = PC2, label = rownames(PCAvect)))
+
+PCA_plot #expects linear response of species abundance to env variables - not always a valid assumption
+```
+
+#### NMDS
+
+Non-metric Multidimensional Scaling
+
+Good for nonlinear responses (eg a unimodal response)
+How might communities separate according to their dissimilarity to each other?
+NMDS is again collapsing variation into two axes but slightly differently than PCA
+
+Construct dissimilarity matrix (species ~ site -> site ~ site); then use the dissimilarity as input to ordination space
+
+default dissimilarity measure is bray-curtis distance - use the one that makes most sense for your data
+
+```{r bird-NMDS}
+#
+bird_NMDS <- metaMDS(birds)
+
+bird_NMDS
+
+nmdsplot <- plot(bird_NMDS) #circles are sites (communities/rows), crosses are species
+  #NMDS is a mapping not a rotation - axes don't matter wrt variation, etc - it's just a framework
+  #for describing dissimilarity between communities
+
+stressplot(bird_NMDS)
+#stress = how far the community moves from its original state in dissimilarity
+#this output is not ideal - too much stress
+
+```
+
+```{r NMDS-plot}
+# exracting outputs
+nmds_df <- as_tibble(bird_NMDS$points) %>% 
+  # bind with metadata to plot
+  bind_cols(site_type, .)
+
+nmds_plot <- ggplot(nmds_df, aes(x = MDS1, y = MDS2, color = landtype, shape = landtype)) +
+  geom_point(size = 3, alpha = 0.8) +
+  stat_ellipse()
+nmds_plot
+#all 3 habitats have different habitat structures but lots of overlap...
+```
+
+?betadisper should always be used to check assumptions of nmds (?)
+
+##### Things to consider about stress
+
+```{r subsampled-NMDS}
+sub <- birds[sample(nrow(birds), 20), ]
+subNMDS <- metaMDS(sub)
+stressplot(subNMDS) #this subsample brings the stress level down to something that would be acceptable for this ordination
+```
+
+### How is community structure related to specific environmental variables?
+
+```{r bird-CCA}
+# Canonical correspondence analysis
+# only shows variation in communities based on environmental variables
+# like a hypothesis test for what you think is most likely to contribute to variation - don't just throw all the variables in
+# good place to try several models and do model selection?
+birdCCA <- cca(birds ~ canopy_height + stems_ha + big_stem_bas, data = env)
+birdCCA
+
+#again, measure of inertia (amt of variation in community composition)
+#compare constrained and unconstrained inertia
+
+```
+
+```{r bird-CCA-plot}
+ccaplot <- plot(birdCCA)
+#this plot reads similar to PCA - x, y axes are the two components that describe most variation and arrows describe how communities might separate along env variables
+
+# scaling factor is taken from structure of plot str(ccaplot) $biplot
+ccavectors <- as.data.frame(ccaplot$biplot * 7.69) #scaling factor will change based on the size of your R window / plot output
+
+#coordinates from sites and species from biplot output
+site_data <- as.data.frame(ccaplot$sites) %>% 
+  bind_cols(site_type, .)
+
+species_data <- as.data.frame(ccaplot$species)
+
+cca_plot <- ggplot(site_data) +
+  geom_point(aes(x = CCA1, y = CCA2, color = landtype), shape = 19) +
+  geom_segment(data = ccavectors, aes(x = 0, y = 0, xend = CCA1, yend = CCA2), arrow = arrow(length = unit(0.2, "cm"))) +
+ # scale_x_continuous(limits = c(-10, 16)) + #these cut off part of the plot - comment them out to fix error
+ # scale_y_continuous(limits = c(-3, 12)) +
+  geom_point(data = species_data, aes(x = CCA1, y = CCA2), shape = 17, size = 2, color = "blue") +
+  geom_text(data = ccavectors, aes(x = CCA1, y = CCA2, label = rownames(ccavectors)))
+cca_plot
+
+#length of arrows indicates relative importance to the ordination - here stem basal area is more important than canopy height or stems per hectare
+#direction of the arrows indicates correlation between variables
+#location of sites/species related to arrows is more important now: more stems/ha in dry sites, taller canopies in riparian sites
+```
